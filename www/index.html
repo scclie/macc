@@ -23,22 +23,21 @@
 <h1>macc</h1>
 <p>your matrix account: <code>@{%LP%}:{%DOMAIN%}</code></p>
 {%MSG%}
+{%PASSWORD%}
 
 <form id="create" method="post" action="/create" {%EXISTS_CREATE%}>
   <h2>create the account</h2>
   <input type="hidden" name="csrf" value="{%CSRF%}">
   <label>matrix nick <input type="text" name="nick" value="{%CREATENICK%}" minlength="1" maxlength="255" pattern="[a-z0-9._-]{1,255}" required autocomplete="off"></label>
-  <label>password <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
   <button type="submit">create</button>
-  <p><small>⚠️ THIS IS TEMPORARY PASSWORD!!!! after logging in to matrix, change it in your client's account settings. This tool is only for registering new accounts, or resetting a lost password.</small></p>
+  <p><small>⚠️ a random password will be generated. after logging in to matrix, change it in your client's account settings.</small></p>
 </form>
 
 <form id="reset" method="post" action="/reset" {%EXISTS_RESET%}>
   <h2>reset the password</h2>
   <input type="hidden" name="csrf" value="{%CSRF%}">
-  <label>new password <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
-  <button type="submit">reset</button>
-  <p><small>⚠️ THIS IS TEMPORARY PASSWORD!!!! after logging in to matrix, change it in your client's account settings. This tool is only for registering new accounts, or resetting a lost password.</small></p>
+  <button type="submit">generate new password</button>
+  <p><small>⚠️ a random password will be generated. after logging in to matrix, change it in your client's account settings.</small></p>
 </form>
 
 <p><small>logged in via oidc. the matrix account itself uses a plain password (see msc3861/msc3824 mess). {%WEB_URL%}</small></p>

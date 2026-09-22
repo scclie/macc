@@ -66,6 +66,14 @@ fn is_success(reply: &str) -> bool {
     reply.to_ascii_lowercase().contains("successfully")
 }
 
+pub fn extract_password(reply: &str) -> Option<String> {
+    // Format: "Successfully reset the password for user @sccl:pierdol.ing: `PKYdRVM0Yt7Gbv39uhDkPDqFX`"
+    // or: "Successfully created user @nick:pierdol.ing with password `abc123`"
+    let start = reply.find('`')? + 1;
+    let end = reply[start..].find('`')? + start;
+    Some(reply[start..end].to_string())
+}
+
 fn last_admin_message(cfg: &Cfg, room: &str) -> Option<String> {
     let (status, body) = http_call(
         cfg,
@@ -78,12 +86,18 @@ fn last_admin_message(cfg: &Cfg, room: &str) -> Option<String> {
         return None;
     }
     let mut idx = 0usize;
+    let mut found_our_command = false;
     while let Some(rel) = body[idx..].find("\"type\":\"m.room.message\"") {
         let start = idx + rel;
         let seg = &body[start..];
-        if json_str(seg, "sender").as_deref() == Some(cfg.admin_user.as_str()) {
-            if let Some(text) = json_str(seg, "body") {
-                return Some(text);
+        let sender = json_str(seg, "sender");
+        let text = json_str(seg, "body");
+        
+        if let (Some(s), Some(t)) = (sender, text) {
+            if s == cfg.admin_user {
+                found_our_command = true;
+            } else if found_our_command {
+                return Some(t);
             }
         }
         idx = start + 1;
@@ -282,7 +296,7 @@ fn trunc(s: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_length, is_chunked, decode_chunked};
+    use super::{content_length, is_chunked, decode_chunked, extract_password, is_success};
 
     #[test]
     fn content_length_is_case_insensitive() {
@@ -311,5 +325,31 @@ mod tests {
     fn decode_chunked_handles_multiple_chunks() {
         let data = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         assert_eq!(decode_chunked(data), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn extract_password_from_reset_reply() {
+        let reply = "Successfully reset the password for user @sccl:pierdol.ing: `PKYdRVM0Yt7Gbv39uhDkPDqFX`";
+        assert_eq!(extract_password(reply), Some("PKYdRVM0Yt7Gbv39uhDkPDqFX".to_string()));
+    }
+
+    #[test]
+    fn extract_password_from_create_reply() {
+        let reply = "Successfully created user @nick:pierdol.ing with password `abc123xyz`";
+        assert_eq!(extract_password(reply), Some("abc123xyz".to_string()));
+    }
+
+    #[test]
+    fn extract_password_returns_none_if_no_backticks() {
+        let reply = "Successfully reset the password";
+        assert_eq!(extract_password(reply), None);
+    }
+
+    #[test]
+    fn is_success_detects_successful_responses() {
+        assert!(is_success("Successfully reset the password for user @sccl:pierdol.ing: `abc123`"));
+        assert!(is_success("Successfully created user @nick:pierdol.ing with password `xyz789`"));
+        assert!(!is_success("Command failed with error: This account does not exist."));
+        assert!(!is_success("Some other error"));
     }
 }

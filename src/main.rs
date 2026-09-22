@@ -57,7 +57,7 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let user = localpart_from_headers(cfg, &req.headers).unwrap_or_default();
             let mapped = mapping.get(&user);
             let csrf = http::random_token();
-            let body = page(cfg, mapped.as_deref(), &user, None, &csrf);
+            let body = page(cfg, mapped.as_deref(), &user, None, "", &csrf);
             http::respond(
                 &mut stream,
                 "200 OK",
@@ -92,23 +92,10 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
                 return Ok(());
             }
 
-            let password = match http::form_value(&req.body, "password") {
-                Some(p) => p,
-                None => {
-                    http::respond(&mut stream, "400 Bad Request", "text/plain", "password is required", "")?;
-                    return Ok(());
-                }
-            };
-            if let Some(e) = validate_password(&password, cfg.password_min) {
-                let body = page(cfg, mapping.get(&user).as_deref(), &user, Some(("error", e)), "");
-                http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
-                return Ok(());
-            }
-
             let room = match matrix::resolve_admin_room(cfg) {
                 Ok(r) => r,
                 Err(e) => {
-                    let body = page(cfg, None, &user, Some(("error", e)), "");
+                    let body = page(cfg, None, &user, Some(("error", e)), "", "");
                     http::respond(&mut stream, "502 Bad Gateway", "text/html", &body, "")?;
                     return Ok(());
                 }
@@ -116,41 +103,42 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
 
             if creating {
                 if let Some(existing) = mapping.get(&user) {
-                    let body = page(cfg, Some(&existing), &existing, Some(("error", format!("you already have @{existing}, use reset"))), "");
+                    let body = page(cfg, Some(&existing), &existing, Some(("error", format!("you already have @{existing}, use reset"))), "", "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     return Ok(());
                 }
                 let nick = match http::form_value(&req.body, "nick") {
                     Some(n) => n,
                     None => {
-                        let body = page(cfg, None, &user, Some(("error", "nick is required".into())), "");
+                        let body = page(cfg, None, &user, Some(("error", "nick is required".into())), "", "");
                         http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                         return Ok(());
                     }
                 };
                 if let Some(e) = validate_nick(&nick) {
-                    let body = page(cfg, None, &user, Some(("error", e)), "");
+                    let body = page(cfg, None, &user, Some(("error", e)), "", "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     return Ok(());
                 }
                 if matrix::profile_exists(cfg, &matrix::mxid(cfg, &nick)).unwrap_or(false) {
-                    let body = page(cfg, None, &nick, Some(("error", format!("{nick} is taken"))), "");
+                    let body = page(cfg, None, &nick, Some(("error", format!("{nick} is taken"))), "", "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     return Ok(());
                 }
-                let cmd = format!("!admin users create {} {}", nick, password);
+                let cmd = format!("!admin users create {}", nick);
                 match matrix::run_admin_command(cfg, &room, &cmd) {
-                    Ok(_) => {
+                    Ok(reply) => {
+                        let password = matrix::extract_password(&reply).unwrap_or_else(|| "unknown".to_string());
                         if let Err(e) = mapping.claim(&user, &nick) {
-                            let body = page(cfg, None, &nick, Some(("error", format!("account created but mapping write failed: {e}"))), "");
+                            let body = page(cfg, None, &nick, Some(("error", format!("account created but mapping write failed: {e}"))), &password, "");
                             http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                             return Ok(());
                         }
-                        let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("account @{nick}:{} created. {}", cfg.domain, if cfg.web_url.is_empty() { String::from("log in.") } else { format!("log in at {}.", cfg.web_url) }))), "");
+                        let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("account @{nick}:{} created", cfg.domain))), &password, "");
                         http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     }
                     Err(e) => {
-                        let body = page(cfg, None, &nick, Some(("error", e)), "");
+                        let body = page(cfg, None, &nick, Some(("error", e)), "", "");
                         http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     }
                 }
@@ -160,20 +148,21 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let nick = match mapping.get(&user) {
                 Some(n) => n,
                 None => {
-                    let body = page(cfg, None, &user, Some(("error", "no account yet, create one first".into())), "");
+                    let body = page(cfg, None, &user, Some(("error", "no account yet, create one first".into())), "", "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                     return Ok(());
                 }
             };
             let target = matrix::mxid(cfg, &nick);
-            let cmd = format!("!admin users reset-password --convert-to-local-account {target} {password}");
+            let cmd = format!("!admin users reset-password --convert-to-local-account {target}");
             match matrix::run_admin_command(cfg, &room, &cmd) {
-                Ok(_) => {
-                    let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("password for @{nick}:{} updated", cfg.domain))), "");
+                Ok(reply) => {
+                    let password = matrix::extract_password(&reply).unwrap_or_else(|| "unknown".to_string());
+                    let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("password for @{nick}:{} reset", cfg.domain))), &password, "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                 }
                 Err(e) => {
-                    let body = page(cfg, Some(&nick), &nick, Some(("error", e)), "");
+                    let body = page(cfg, Some(&nick), &nick, Some(("error", e)), "", "");
                     http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
                 }
             }
@@ -311,7 +300,7 @@ mod localpart_tests {
     }
 }
 
-fn page(cfg: &Cfg, existing_nick: Option<&str>, default_nick: &str, msg: Option<(&str, String)>, csrf: &str) -> String {
+fn page(cfg: &Cfg, existing_nick: Option<&str>, default_nick: &str, msg: Option<(&str, String)>, password: &str, csrf: &str) -> String {
     let message = msg
         .map(|(kind, text)| format!("<p class=\"{}\">{}</p>", kind, http::html_escape(&text)))
         .unwrap_or_default();
@@ -320,6 +309,11 @@ fn page(cfg: &Cfg, existing_nick: Option<&str>, default_nick: &str, msg: Option<
     } else {
         format!("log in at <a href=\"{}\">{}</a> after creating.", http::html_escape(&cfg.web_url), http::html_escape(&cfg.web_url))
     };
+    let password_block = if password.is_empty() || password == "unknown" {
+        String::new()
+    } else {
+        format!("<p><strong>your password:</strong> <code style=\"background:#3b4252;padding:0.3em;font-size:1.1em;\">{}</code></p><p><small>⚠️ change this in your matrix client after logging in.</small></p>", http::html_escape(password))
+    };
     let shown_nick = existing_nick.unwrap_or(default_nick);
     HTML
         .replace("{%DOMAIN%}", &http::html_escape(&cfg.domain))
@@ -327,6 +321,7 @@ fn page(cfg: &Cfg, existing_nick: Option<&str>, default_nick: &str, msg: Option<
         .replace("{%LP%}", &http::html_escape(shown_nick))
         .replace("{%CREATENICK%}", &http::html_escape(default_nick))
         .replace("{%CSRF%}", &http::html_escape(csrf))
+        .replace("{%PASSWORD%}", &password_block)
         .replace("{%EXISTS_CREATE%}", if existing_nick.is_some() { "hidden" } else { "" })
         .replace("{%EXISTS_RESET%}", if existing_nick.is_none() { "hidden" } else { "" })
         .replace("{%MSG%}", &message)
