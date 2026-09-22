@@ -200,7 +200,7 @@ fn localpart_from_headers(cfg: &Cfg, headers: &std::collections::HashMap<String,
         }
     }
 
-    let bare = user.rsplit('@').next().unwrap_or(user);
+    let bare = user.rsplit('@').next_back().unwrap_or(user);
     let lp = bare.to_lowercase();
     let ok = !lp.is_empty()
         && lp.len() <= 255
@@ -268,6 +268,46 @@ mod validate_nick_tests {
     #[test]
     fn nick_with_allowed_chars_is_accepted() {
         assert!(validate_nick("ab_cd.ef-gh1").is_none());
+    }
+}
+
+#[cfg(test)]
+mod localpart_tests {
+    use std::collections::HashMap;
+
+    fn lp_from(h: &[(&str, &str)]) -> Result<String, String> {
+        let mut m = HashMap::new();
+        for (k, v) in h {
+            m.insert(k.to_string(), v.to_string());
+        }
+        let cfg = super::Cfg {
+            port: String::new(),
+            hs: String::new(),
+            domain: String::new(),
+            web_url: String::new(),
+            admin_token: String::new(),
+            admin_user: String::new(),
+            admin_room: String::new(),
+            allowed_group: None,
+            password_min: 10,
+            state_dir: String::new(),
+        };
+        super::localpart_from_headers(&cfg, &m)
+    }
+
+    #[test]
+    fn preferred_username_with_kanidm_domain_yields_localpart() {
+        assert_eq!(lp_from(&[("x-auth-request-preferred-username", "sccl@id.pierdol.ing")]).unwrap(), "sccl");
+    }
+
+    #[test]
+    fn email_header_yields_localpart_before_at() {
+        assert_eq!(lp_from(&[("x-auth-request-user", "sccl@sccl.cc")]).unwrap(), "sccl");
+    }
+
+    #[test]
+    fn bare_username_passes_through() {
+        assert_eq!(lp_from(&[("x-auth-request-user", "sccl")]).unwrap(), "sccl");
     }
 }
 
