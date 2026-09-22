@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>macc — matrix account</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.5 monospace; max-width: 480px; margin: 3rem auto; padding: 0 1rem; color: #d8dee9; background: #2e3440; }
+  h1 { font-size: 1.3rem; color: #eceff4; }
+  input { width: 100%; padding: .5rem; margin: .3rem 0 .8rem; box-sizing: border-box; background: #3b4252; color: #e5e9f0; border: 1px solid #4c566a; }
+  button { width: 100%; padding: .6rem; font-weight: bold; border: 0; cursor: pointer; color: #2e3440; }
+  #create button { background: #a3be8c; }
+  #reset button { background: #d08770; }
+  form { border: 1px solid #434c5e; padding: 1rem 1rem .5rem; margin-bottom: 1rem; }
+  p.ok { color: #a3be8c; }
+  p.error { color: #bf616a; white-space: pre-wrap; }
+  a { color: #88c0d0; }
+  small { color: #4c566a; }
+</style>
+</head>
+<body>
+<h1>macc</h1>
+<p>your matrix account: <code>@{%LP%}:{%DOMAIN%}</code></p>
+{%MSG%}
+
+<form id="create" method="post" action="/create" {%EXISTS_CREATE%}>
+  <h2>create the account</h2>
+  <input type="hidden" name="csrf" value="{%CSRF%}">
+  <label>matrix nick <input type="text" name="nick" value="{%CREATENICK%}" minlength="1" maxlength="255" pattern="[a-z0-9._-]{1,255}" required autocomplete="off"></label>
+  <label>password <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
+  <button type="submit">create</button>
+</form>
+
+<form id="reset" method="post" action="/reset" {%EXISTS_RESET%}>
+  <h2>reset the password</h2>
+  <input type="hidden" name="csrf" value="{%CSRF%}">
+  <label>new password <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
+  <button type="submit">reset</button>
+</form>
+
+<p><small>logged in via oidc. the matrix account itself uses a plain password (see msc3861/msc3824 mess). {%WEB_URL%}</small></p>
+</body>
+</html>

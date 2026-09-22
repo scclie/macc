@@ -1,0 +1,8 @@
+[package]
+name = "macc"
+version = "0.1.0"
+edition = "2021"
+description = "self-service matrix account portal: a kanidm user creates/resets their own matrix account"
+license = "MIT"
+
+[dependencies]
