@@ -11,7 +11,6 @@ pub struct Cfg {
     pub admin_user: String, // mxid of that bot (replies to admin commands come from it)
     pub admin_room: String, // room alias of the admin room, e.g. #admins:example.org
     pub allowed_group: Option<String>, // oidc group required (oauth2-proxy enforces too)
-    pub password_min: usize,
     pub state_dir: String,
 }
 
@@ -26,7 +25,6 @@ impl Cfg {
             admin_user: env_or("ADMIN_USER", ""),
             admin_room: env_or("ADMIN_ROOM", ""),
             allowed_group: std::env::var("ALLOWED_GROUP").ok().filter(|s| !s.is_empty()),
-            password_min: env_or("PASSWORD_MIN", "10").parse().unwrap_or(10),
             state_dir: env_or("STATE_DIR", "/var/lib/macc"),
         };
 
@@ -48,7 +46,7 @@ impl Cfg {
         }
         if !missing.is_empty() {
             eprintln!(
-                "macc: missing required env vars: {}\n  HS=                 homeserver client api base, e.g. http://10.0.0.19:6167\n  HS_DOMAIN=          matrix server_name, e.g. example.org\n  ADMIN_TOKEN=        access token of the admin bot\n  ADMIN_USER=         mxid of that bot, e.g. @maccbot:example.org\n  ADMIN_ROOM=         admin room alias, e.g. #admins:example.org\n  WEB_URL=            (optional) element/cinny url for the page footer\n  ALLOWED_GROUP=      (optional) oidc group required to use the portal\n  PORT=               (default 8787)\n  PASSWORD_MIN=       (default 10)\n  STATE_DIR=          (optional, default /var/lib/macc)",
+                "macc: missing required env vars: {}\n  HS=                 homeserver client api base, e.g. http://10.0.0.19:6167\n  HS_DOMAIN=          matrix server_name, e.g. example.org\n  ADMIN_TOKEN=        access token of the admin bot\n  ADMIN_USER=         mxid of that bot, e.g. @maccbot:example.org\n  ADMIN_ROOM=         admin room alias, e.g. #admins:example.org\n  WEB_URL=            (optional) element/cinny url for the page footer\n  ALLOWED_GROUP=      (optional) oidc group required to use the portal\n  PORT=               (default 8787)\n  STATE_DIR=          (optional, default /var/lib/macc)",
                 missing.join(", ")
             );
             std::process::exit(1);
@@ -67,14 +65,14 @@ mod tests {
 
     #[test]
     fn state_dir_from_env_with_default() {
-        std::env::set_var("STATE_DIR", "/tmp/macc-test");
-        std::env::set_var("HS", "http://fail:1");
-        std::env::set_var("HS_DOMAIN", "x");
-        std::env::set_var("ADMIN_TOKEN", "x");
-        std::env::set_var("ADMIN_USER", "@b:x");
-        std::env::set_var("ADMIN_ROOM", "#a:x");
+        std::env::set_var("STATE_DIR", "/tmp/macc-test-state");
+        std::env::set_var("HS", "http://localhost:6167");
+        std::env::set_var("HS_DOMAIN", "example.org");
+        std::env::set_var("ADMIN_TOKEN", "test-token");
+        std::env::set_var("ADMIN_USER", "@bot:example.org");
+        std::env::set_var("ADMIN_ROOM", "#admins:example.org");
         let cfg = Cfg::from_env();
-        assert_eq!(cfg.state_dir, "/tmp/macc-test");
+        assert_eq!(cfg.state_dir, "/tmp/macc-test-state");
         std::env::remove_var("STATE_DIR");
         let cfg = Cfg::from_env();
         assert_eq!(cfg.state_dir, "/var/lib/macc");

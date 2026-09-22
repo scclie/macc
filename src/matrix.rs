@@ -21,18 +21,20 @@ pub fn resolve_admin_room(cfg: &Cfg) -> Result<String, String> {
 }
 
 pub fn profile_exists(cfg: &Cfg, target: &str) -> Result<bool, String> {
-    let (status, _) = http_call(cfg, "GET", &format!("/_matrix/client/v3/profile/{target}"), &cfg.admin_token, None);
+    let (status, body) = http_call(cfg, "GET", &format!("/_matrix/client/v3/profile/{target}"), &cfg.admin_token, None);
     match status {
-        200 => Ok(true),
+        200 => {
+            // continuwuity returns 200 with empty body for non-existent profiles
+            let trimmed = body.trim();
+            Ok(!trimmed.is_empty() && trimmed != "{}")
+        }
         404 => Ok(false),
         0 => Err("profile check: connect/fetch failed".into()),
         s => Err(format!("profile check: http {s}")),
     }
 }
 
-pub fn run_admin_command(cfg: &Cfg, room: &str, command: &str) -> Result<String, String> {
-    // password/localpart are validated to a charset without " or \, so no
-    // json escaping needed here
+pub fn run_admin_command(cfg: &Cfg, room: &str, command: &str, expected_mxid: &str) -> Result<String, String> {
     let payload = format!("{{\"msgtype\":\"m.text\",\"body\":\"{command}\"}}");
     let txn = format!(
         "macc{}",
@@ -49,63 +51,85 @@ pub fn run_admin_command(cfg: &Cfg, room: &str, command: &str) -> Result<String,
         return Err(format!("send admin command: http {status}: {}", trunc(&b, 200)));
     }
 
-    // poll the admin room for a fresh reply from the admin bot
-    for _ in 0..12 {
+    let cmd_event_id = json_str(&b, "event_id").ok_or("no event_id in PUT response")?;
+
+    for _ in 0..15 {
         std::thread::sleep(std::time::Duration::from_millis(800));
-        if let Some(reply) = last_admin_message(cfg, room) {
-            if is_success(reply.as_str()) {
+        if let Some(reply) = reply_to_event(cfg, room, &cmd_event_id, expected_mxid) {
+            if is_success(&reply) {
                 return Ok(reply);
             }
             return Err(reply);
         }
     }
-    Err("no admin reply within timeout; check the admin room".into())
+    Err("no server reply within timeout; check the admin room".into())
 }
 
-fn is_success(reply: &str) -> bool {
-    reply.to_ascii_lowercase().contains("successfully")
-}
-
-pub fn extract_password(reply: &str) -> Option<String> {
-    // Format: "Successfully reset the password for user @sccl:pierdol.ing: `PKYdRVM0Yt7Gbv39uhDkPDqFX`"
-    // or: "Successfully created user @nick:pierdol.ing with password `abc123`"
-    let start = reply.find('`')? + 1;
-    let end = reply[start..].find('`')? + start;
-    Some(reply[start..end].to_string())
-}
-
-fn last_admin_message(cfg: &Cfg, room: &str) -> Option<String> {
+fn reply_to_event(cfg: &Cfg, room: &str, target_event_id: &str, expected_mxid: &str) -> Option<String> {
     let (status, body) = http_call(
         cfg,
         "GET",
-        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=12"),
+        &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=20"),
         &cfg.admin_token,
         None,
     );
     if status != 200 {
         return None;
     }
+
+    // split body into individual message objects by finding "type":"m.room.message"
     let mut idx = 0usize;
-    let mut found_our_command = false;
     while let Some(rel) = body[idx..].find("\"type\":\"m.room.message\"") {
-        let start = idx + rel;
-        let seg = &body[start..];
-        let sender = json_str(seg, "sender");
-        let text = json_str(seg, "body");
-        
-        if let (Some(s), Some(t)) = (sender, text) {
-            if s == cfg.admin_user {
-                found_our_command = true;
-            } else if found_our_command {
+        let type_pos = idx + rel;
+
+        // find the start of this message object (go back to find "content":{)
+        let msg_start = body[..type_pos].rfind("\"content\":{").unwrap_or(type_pos);
+
+        // find the end of this message object (next "type":"m.room.message" AFTER current)
+        let msg_end = body[type_pos + 1..].find("\"type\":\"m.room.message\"")
+            .map(|next| type_pos + 1 + next)
+            .unwrap_or(body.len());
+
+        let msg = &body[msg_start..msg_end];
+
+        let sender = json_str(msg, "sender");
+        let text = json_str(msg, "body");
+
+        // find in_reply_to event_id in the full message
+        let reply_to = msg.find("\"m.in_reply_to\"")
+            .and_then(|pos| {
+                let segment = &msg[pos..];
+                segment.find("\"event_id\":\"").map(|pos2| {
+                    let val_start = pos2 + "\"event_id\":\"".len();
+                    let val_end = segment[val_start..].find('"').map(|e| val_start + e).unwrap_or(val_start);
+                    segment[val_start..val_end].to_string()
+                })
+            });
+
+        if let (Some(s), Some(t), Some(reply_eid)) = (sender, text, reply_to.as_deref()) {
+            if reply_eid == target_event_id && s != cfg.admin_user && t.contains(expected_mxid) {
                 return Some(t);
             }
         }
-        idx = start + 1;
+
+        idx = type_pos + 1;
         if idx >= body.len() {
             break;
         }
     }
     None
+}
+
+fn is_success(reply: &str) -> bool {
+    let lower = reply.to_ascii_lowercase();
+    lower.contains("successfully") || lower.contains("created new user") || lower.contains("created user")
+}
+
+pub fn extract_password(reply: &str, expected_mxid: &str) -> Option<String> {
+    let mxid_pos = reply.find(expected_mxid)?;
+    let start = reply[mxid_pos..].find('`')? + mxid_pos + 1;
+    let end = reply[start..].find('`')? + start;
+    Some(reply[start..end].to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -317,8 +341,8 @@ mod tests {
 
     #[test]
     fn decode_chunked_handles_single_chunk() {
-        let data = b"47\r\n{\"room_id\":\"!AkHpTjH0Rre5klEQrt:pierdol.ing\",\"servers\":[\"pierdol.ing\"]}\r\n0\r\n\r\n";
-        assert_eq!(decode_chunked(data), Some("{\"room_id\":\"!AkHpTjH0Rre5klEQrt:pierdol.ing\",\"servers\":[\"pierdol.ing\"]}".to_string()));
+        let data = b"3b\r\n{\"room_id\":\"!abc123:example.org\",\"servers\":[\"example.org\"]}\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(data), Some("{\"room_id\":\"!abc123:example.org\",\"servers\":[\"example.org\"]}".to_string()));
     }
 
     #[test]
@@ -329,26 +353,33 @@ mod tests {
 
     #[test]
     fn extract_password_from_reset_reply() {
-        let reply = "Successfully reset the password for user @sccl:pierdol.ing: `PKYdRVM0Yt7Gbv39uhDkPDqFX`";
-        assert_eq!(extract_password(reply), Some("PKYdRVM0Yt7Gbv39uhDkPDqFX".to_string()));
+        let reply = "Successfully reset the password for user @alice:example.org: `PKYdRVM0Yt7Gbv39uhDkPDqFX`";
+        assert_eq!(extract_password(reply, "@alice:example.org"), Some("PKYdRVM0Yt7Gbv39uhDkPDqFX".to_string()));
     }
 
     #[test]
     fn extract_password_from_create_reply() {
-        let reply = "Successfully created user @nick:pierdol.ing with password `abc123xyz`";
-        assert_eq!(extract_password(reply), Some("abc123xyz".to_string()));
+        let reply = "Successfully created user @bob:example.org with password `abc123xyz`";
+        assert_eq!(extract_password(reply, "@bob:example.org"), Some("abc123xyz".to_string()));
     }
 
     #[test]
     fn extract_password_returns_none_if_no_backticks() {
         let reply = "Successfully reset the password";
-        assert_eq!(extract_password(reply), None);
+        assert_eq!(extract_password(reply, "@alice:example.org"), None);
+    }
+
+    #[test]
+    fn extract_password_ignores_backticks_before_mxid() {
+        let reply = "Some text with `fake` before @alice:example.org: `realpassword`";
+        assert_eq!(extract_password(reply, "@alice:example.org"), Some("realpassword".to_string()));
     }
 
     #[test]
     fn is_success_detects_successful_responses() {
-        assert!(is_success("Successfully reset the password for user @sccl:pierdol.ing: `abc123`"));
-        assert!(is_success("Successfully created user @nick:pierdol.ing with password `xyz789`"));
+        assert!(is_success("Successfully reset the password for user @alice:example.org: `abc123`"));
+        assert!(is_success("Successfully created user @bob:example.org with password `xyz789`"));
+        assert!(is_success("| level | span | message |\n| ------: | :-----: | :------- |\n|  INFO |   command    | Created new user account for @charlie:example.org |\n\nCreated user @charlie:example.org with password `abc123`"));
         assert!(!is_success("Command failed with error: This account does not exist."));
         assert!(!is_success("Some other error"));
     }

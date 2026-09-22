@@ -78,11 +78,11 @@ mod tests {
         let dir = std::env::temp_dir().join("macc-mapping-test");
         let _ = fs::remove_dir_all(&dir);
         let m = Mapping::new(dir.to_str().unwrap());
-        assert_eq!(m.get("airys"), None);
-        m.claim("Airys", "Miniairys").unwrap();
-        assert_eq!(m.get("airys").as_deref(), Some("miniairys"));
+        assert_eq!(m.get("alice"), None);
+        m.claim("Alice", "alice123").unwrap();
+        assert_eq!(m.get("alice").as_deref(), Some("alice123"));
         let reloaded = Mapping::new(dir.to_str().unwrap());
-        assert_eq!(reloaded.get("airys").as_deref(), Some("miniairys"));
+        assert_eq!(reloaded.get("alice").as_deref(), Some("alice123"));
     }
 
     #[test]
@@ -90,8 +90,8 @@ mod tests {
         let dir = std::env::temp_dir().join("macc-mapping-test2");
         let _ = fs::remove_dir_all(&dir);
         let m = Mapping::new(dir.to_str().unwrap());
-        m.claim("airys", "one").unwrap();
-        m.claim("airys", "two").unwrap();
-        assert_eq!(m.get("airys").as_deref(), Some("two"));
+        m.claim("alice", "one").unwrap();
+        m.claim("alice", "two").unwrap();
+        assert_eq!(m.get("alice").as_deref(), Some("two"));
     }
 }

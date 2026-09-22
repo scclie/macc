@@ -1,8 +1,8 @@
 # macc
 
 self-service matrix account portal. user proves who they are via oidc and
-creates their matrix account or resets its password. no admin bot to bother.
-
+creates their matrix account or resets its password.
+![preview_passgen](./img/macc.webp)
 ## why
 
 matrix auth is stuck between msc3861 (oidc) and msc3824 (password upgrade).

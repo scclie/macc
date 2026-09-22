@@ -21,7 +21,7 @@
 </head>
 <body>
 <h1>macc</h1>
-<p>your matrix account: <code>@{%LP%}:{%DOMAIN%}</code></p>
+<p>your matrix account: <code>@{%LP%}:{%DOMAIN%}</code> <small>(<a href="/oauth2/sign_out">log out</a>)</small></p>
 {%MSG%}
 {%PASSWORD%}
 
@@ -41,5 +41,17 @@
 </form>
 
 <p><small>logged in via oidc. the matrix account itself uses a plain password (see msc3861/msc3824 mess). {%WEB_URL%}</small></p>
+
+<script>
+document.querySelectorAll('form').forEach(form => {
+  form.addEventListener('submit', function() {
+    const btn = this.querySelector('button[type="submit"]');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'processing...';
+    }
+  });
+});
+</script>
 </body>
 </html>

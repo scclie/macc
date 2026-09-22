@@ -42,6 +42,43 @@ fn main() {
     }
 }
 
+fn read_flash_cookie(req: &crate::http::Req) -> (Option<(String, String)>, Option<String>) {
+    let cookies = req.headers.get("cookie").map(|c| c.as_str()).unwrap_or("");
+    let mut msg = None;
+    let mut password = None;
+    for part in cookies.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            match k {
+                "macc_flash_msg" => {
+                    if !v.is_empty() {
+                        // format: "ok:message" or "error:message"
+                        if let Some((kind, text)) = v.split_once(':') {
+                            msg = Some((kind.to_string(), text.to_string()));
+                        }
+                    }
+                }
+                "macc_flash_password" => {
+                    if !v.is_empty() {
+                        password = Some(v.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (msg, password)
+}
+
+fn redirect_with_flash(stream: &mut std::net::TcpStream, msg_kind: &str, msg_text: &str, password: Option<&str>) -> std::io::Result<()> {
+    let mut headers = String::new();
+    headers.push_str(&format!("Set-Cookie: macc_flash_msg={}:{}; Path=/; HttpOnly; SameSite=Strict\r\n", msg_kind, msg_text));
+    if let Some(pw) = password {
+        headers.push_str(&format!("Set-Cookie: macc_flash_password={}; Path=/; HttpOnly; SameSite=Strict\r\n", pw));
+    }
+    http::respond(stream, "303 See Other", "text/plain", "", &format!("{}Location: /\r\n", headers))
+}
+
 fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::io::Result<()> {
     let req = match http::read_request(&mut stream) {
         Ok(r) => r,
@@ -57,13 +94,21 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let user = localpart_from_headers(cfg, &req.headers).unwrap_or_default();
             let mapped = mapping.get(&user);
             let csrf = http::random_token();
-            let body = page(cfg, mapped.as_deref(), &user, None, "", &csrf);
+            
+            // read flash cookie (one-time message from POST)
+            let (flash_msg, flash_password) = read_flash_cookie(&req);
+            
+            let body = page(cfg, mapped.as_deref(), &user, flash_msg.as_ref().map(|(k,v)| (k.as_str(), v.clone())), flash_password.as_deref().unwrap_or(""), &csrf);
+            let mut headers = format!("Set-Cookie: macc_csrf={csrf}; Path=/; HttpOnly; SameSite=Strict\r\n");
+            // clear flash cookies
+            headers.push_str("Set-Cookie: macc_flash_msg=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+            headers.push_str("Set-Cookie: macc_flash_password=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
             http::respond(
                 &mut stream,
                 "200 OK",
                 "text/html",
                 &body,
-                &format!("Set-Cookie: macc_csrf={csrf}; Path=/; HttpOnly; SameSite=Strict\r\n"),
+                &headers,
             )
         }
         ("POST", "/create") | ("POST", "/reset") => {
@@ -95,51 +140,44 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let room = match matrix::resolve_admin_room(cfg) {
                 Ok(r) => r,
                 Err(e) => {
-                    let body = page(cfg, None, &user, Some(("error", e)), "", "");
-                    http::respond(&mut stream, "502 Bad Gateway", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", &e, None)?;
                     return Ok(());
                 }
             };
 
             if creating {
                 if let Some(existing) = mapping.get(&user) {
-                    let body = page(cfg, Some(&existing), &existing, Some(("error", format!("you already have @{existing}, use reset"))), "", "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", &format!("you already have @{existing}, use reset"), None)?;
                     return Ok(());
                 }
                 let nick = match http::form_value(&req.body, "nick") {
                     Some(n) => n,
                     None => {
-                        let body = page(cfg, None, &user, Some(("error", "nick is required".into())), "", "");
-                        http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                        redirect_with_flash(&mut stream, "error", "nick is required", None)?;
                         return Ok(());
                     }
                 };
                 if let Some(e) = validate_nick(&nick) {
-                    let body = page(cfg, None, &user, Some(("error", e)), "", "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", &e, None)?;
                     return Ok(());
                 }
                 if matrix::profile_exists(cfg, &matrix::mxid(cfg, &nick)).unwrap_or(false) {
-                    let body = page(cfg, None, &nick, Some(("error", format!("{nick} is taken"))), "", "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", &format!("{nick} is taken"), None)?;
                     return Ok(());
                 }
                 let cmd = format!("!admin users create {}", nick);
-                match matrix::run_admin_command(cfg, &room, &cmd) {
+                let target = matrix::mxid(cfg, &nick);
+                match matrix::run_admin_command(cfg, &room, &cmd, &target) {
                     Ok(reply) => {
-                        let password = matrix::extract_password(&reply).unwrap_or_else(|| "unknown".to_string());
+                        let password = matrix::extract_password(&reply, &target).unwrap_or_else(|| "unknown".to_string());
                         if let Err(e) = mapping.claim(&user, &nick) {
-                            let body = page(cfg, None, &nick, Some(("error", format!("account created but mapping write failed: {e}"))), &password, "");
-                            http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                            redirect_with_flash(&mut stream, "error", &format!("account created but mapping write failed: {e}"), Some(&password))?;
                             return Ok(());
                         }
-                        let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("account @{nick}:{} created", cfg.domain))), &password, "");
-                        http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                        redirect_with_flash(&mut stream, "ok", &format!("account @{nick}:{} created", cfg.domain), Some(&password))?;
                     }
                     Err(e) => {
-                        let body = page(cfg, None, &nick, Some(("error", e)), "", "");
-                        http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                        redirect_with_flash(&mut stream, "error", &e, None)?;
                     }
                 }
                 return Ok(());
@@ -148,22 +186,19 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let nick = match mapping.get(&user) {
                 Some(n) => n,
                 None => {
-                    let body = page(cfg, None, &user, Some(("error", "no account yet, create one first".into())), "", "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", "no account yet, create one first", None)?;
                     return Ok(());
                 }
             };
             let target = matrix::mxid(cfg, &nick);
             let cmd = format!("!admin users reset-password --convert-to-local-account {target}");
-            match matrix::run_admin_command(cfg, &room, &cmd) {
+            match matrix::run_admin_command(cfg, &room, &cmd, &target) {
                 Ok(reply) => {
-                    let password = matrix::extract_password(&reply).unwrap_or_else(|| "unknown".to_string());
-                    let body = page(cfg, Some(&nick), &nick, Some(("ok", format!("password for @{nick}:{} reset", cfg.domain))), &password, "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    let password = matrix::extract_password(&reply, &target).unwrap_or_else(|| "unknown".to_string());
+                    redirect_with_flash(&mut stream, "ok", &format!("password for @{nick}:{} reset", cfg.domain), Some(&password))?;
                 }
                 Err(e) => {
-                    let body = page(cfg, Some(&nick), &nick, Some(("error", e)), "", "");
-                    http::respond(&mut stream, "200 OK", "text/html", &body, "")?;
+                    redirect_with_flash(&mut stream, "error", &e, None)?;
                 }
             }
             Ok(())
@@ -198,26 +233,6 @@ fn localpart_from_headers(cfg: &Cfg, headers: &std::collections::HashMap<String,
         return Err(format!("username '{lp}' is not a valid matrix localpart"));
     }
     Ok(lp)
-}
-
-fn validate_password(p: &str, min: usize) -> Option<String> {
-    if p.len() < min {
-        return Some(format!("password must be at least {min} characters"));
-    }
-    if p.len() > 128 {
-        return Some("password too long".into());
-    }
-    let ok = p.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(
-                c,
-                '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '(' | ')' | '_' | '=' | '+' | '-' | '.' | ',' | ';' | ':' | '?' | '~'
-            )
-    });
-    if !ok {
-        return Some("password has characters that are not safe inside a matrix admin command".into());
-    }
-    None
 }
 
 fn validate_nick(n: &str) -> Option<String> {
@@ -278,25 +293,24 @@ mod localpart_tests {
             admin_user: String::new(),
             admin_room: String::new(),
             allowed_group: None,
-            password_min: 10,
             state_dir: String::new(),
         };
         super::localpart_from_headers(&cfg, &m)
     }
 
     #[test]
-    fn preferred_username_with_kanidm_domain_yields_localpart() {
-        assert_eq!(lp_from(&[("x-auth-request-preferred-username", "sccl@id.pierdol.ing")]).unwrap(), "sccl");
+    fn preferred_username_with_domain_yields_localpart() {
+        assert_eq!(lp_from(&[("x-auth-request-preferred-username", "alice@id.example.org")]).unwrap(), "alice");
     }
 
     #[test]
     fn email_header_yields_localpart_before_at() {
-        assert_eq!(lp_from(&[("x-auth-request-user", "sccl@sccl.cc")]).unwrap(), "sccl");
+        assert_eq!(lp_from(&[("x-auth-request-user", "alice@example.com")]).unwrap(), "alice");
     }
 
     #[test]
     fn bare_username_passes_through() {
-        assert_eq!(lp_from(&[("x-auth-request-user", "sccl")]).unwrap(), "sccl");
+        assert_eq!(lp_from(&[("x-auth-request-user", "alice")]).unwrap(), "alice");
     }
 }
 
