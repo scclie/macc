@@ -129,6 +129,36 @@ fn content_length(head: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn is_chunked(head: &str) -> bool {
+    head.lines().any(|l| {
+        l.split_once(':')
+            .map(|(k, v)| k.trim().eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked"))
+            .unwrap_or(false)
+    })
+}
+
+fn decode_chunked(data: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    let mut pos = 0;
+    let bytes = data;
+    while pos < bytes.len() {
+        let line_end = bytes[pos..].windows(2).position(|w| w == b"\r\n")? + pos;
+        let size_str = std::str::from_utf8(&bytes[pos..line_end]).ok()?;
+        let size = usize::from_str_radix(size_str.trim(), 16).ok()?;
+        if size == 0 {
+            return Some(out);
+        }
+        let chunk_start = line_end + 2;
+        let chunk_end = chunk_start + size;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+        out.push_str(&String::from_utf8_lossy(&bytes[chunk_start..chunk_end]));
+        pos = chunk_end + 2;
+    }
+    Some(out)
+}
+
 fn http_call(cfg: &Cfg, method: &str, path: &str, token: &str, body: Option<&str>) -> (u16, String) {
     let url = format!("{}{}", cfg.hs, path);
     let uri = match split_uri(&url) {
@@ -183,9 +213,18 @@ fn http_call(cfg: &Cfg, method: &str, path: &str, token: &str, body: Option<&str
         }
         if let Some(he) = http::find(&resp[..n], b"\r\n\r\n") {
             let head = String::from_utf8_lossy(&resp[..he]);
-            let cl = content_length(&head);
-            if n >= he + 4 + cl {
-                return (status, String::from_utf8_lossy(&resp[he + 4..he + 4 + cl]).to_string());
+            let chunked = is_chunked(&head);
+            if chunked {
+                let body_start = he + 4;
+                let body_data = &resp[body_start..n];
+                if let Some(decoded) = decode_chunked(body_data) {
+                    return (status, decoded);
+                }
+            } else {
+                let cl = content_length(&head);
+                if n >= he + 4 + cl {
+                    return (status, String::from_utf8_lossy(&resp[he + 4..he + 4 + cl]).to_string());
+                }
             }
         }
     }
@@ -243,7 +282,7 @@ fn trunc(s: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::content_length;
+    use super::{content_length, is_chunked, decode_chunked};
 
     #[test]
     fn content_length_is_case_insensitive() {
@@ -252,5 +291,25 @@ mod tests {
         assert_eq!(content_length("CONTENT-LENGTH: 27\r\n"), 27);
         assert_eq!(content_length("Connection: close\r\n\r\n"), 0);
         assert_eq!(content_length("Content-Length: nope\r\n"), 0);
+    }
+
+    #[test]
+    fn is_chunked_detects_transfer_encoding() {
+        assert!(is_chunked("Transfer-Encoding: chunked\r\n"));
+        assert!(is_chunked("transfer-encoding: Chunked\r\n"));
+        assert!(!is_chunked("Content-Length: 100\r\n"));
+        assert!(!is_chunked(""));
+    }
+
+    #[test]
+    fn decode_chunked_handles_single_chunk() {
+        let data = b"47\r\n{\"room_id\":\"!AkHpTjH0Rre5klEQrt:pierdol.ing\",\"servers\":[\"pierdol.ing\"]}\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(data), Some("{\"room_id\":\"!AkHpTjH0Rre5klEQrt:pierdol.ing\",\"servers\":[\"pierdol.ing\"]}".to_string()));
+    }
+
+    #[test]
+    fn decode_chunked_handles_multiple_chunks() {
+        let data = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(data), Some("hello world".to_string()));
     }
 }
