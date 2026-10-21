@@ -12,15 +12,20 @@ jobs:
     if: startsWith(github.server_url, 'http://10.69.0.10') || startsWith(github.server_url, 'https://git.sccl.cc')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install docker CLI
         run: apt-get update && apt-get install -y docker.io
 
       - name: Build and push image
         run: |
-          docker build -t 10.69.0.17:5000/scclie/macc:main .
+          docker build --pull --no-cache -t 10.69.0.17:5000/scclie/macc:main .
           docker push 10.69.0.17:5000/scclie/macc:main
 
-      - name: Restart container
-        run: docker rm -f macc || true
+      - name: Request digest-pinned production deployment
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' 10.69.0.17:5000/scclie/macc:main | cut -d@ -f2)"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$DIGEST" > /publish/requests/macc.digest.tmp
+          mv /publish/requests/macc.digest.tmp /publish/requests/macc.digest

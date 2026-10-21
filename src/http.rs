@@ -14,6 +14,8 @@ pub struct Req {
 }
 
 pub fn read_request(stream: &mut TcpStream) -> std::io::Result<Req> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
     let mut buf = [0u8; MAX_REQ];
     let mut n = 0usize;
     loop {
@@ -40,6 +42,9 @@ pub fn read_request(stream: &mut TcpStream) -> std::io::Result<Req> {
                 }
             }
             let cl: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+            if cl > MAX_REQ - head_len {
+                return Err(std::io::Error::other("request body too large"));
+            }
             if n >= head_len + cl {
                 let body = String::from_utf8_lossy(&buf[head_len..head_len + cl]).to_string();
                 return Ok(Req { method, path, body, headers });
@@ -74,7 +79,7 @@ pub fn form_value(body: &str, key: &str) -> Option<String> {
     None
 }
 
-fn url_decode(s: &str) -> String {
+pub fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -90,6 +95,18 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+pub fn cookie_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn hex(c: u8) -> Option<u8> {
@@ -111,4 +128,33 @@ pub fn random_token() -> String {
 
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn cookie_values_cannot_inject_headers_or_attributes() {
+        let encoded = cookie_value("ok:one; Path=/\r\nX-Injected: yes");
+        assert!(!encoded.contains(['\r', '\n', ';', ' ']));
+        assert_eq!(url_decode(&encoded), "ok:one; Path=/\r\nX-Injected: yes");
+    }
+
+    #[test]
+    fn huge_content_length_is_rejected_without_overflow() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            match read_request(&mut stream) {
+                Ok(_) => panic!("oversized request accepted"),
+                Err(error) => error.to_string(),
+            }
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(client, "POST /reset HTTP/1.1\r\nContent-Length: {}\r\n\r\n", usize::MAX).unwrap();
+        assert_eq!(task.join().unwrap(), "request body too large");
+    }
 }

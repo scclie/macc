@@ -27,8 +27,9 @@ fn main() {
     }
 
     let mapping = mapping::Mapping::new(&cfg.state_dir);
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", cfg.port)).expect("bind");
-    eprintln!("macc listening on 127.0.0.1:{}", cfg.port);
+    let bind_address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1".into());
+    let listener = TcpListener::bind(format!("{bind_address}:{}", cfg.port)).expect("bind");
+    eprintln!("macc listening on {bind_address}:{}", cfg.port);
 
     for stream in listener.incoming() {
         match stream {
@@ -50,17 +51,18 @@ fn read_flash_cookie(req: &crate::http::Req) -> (Option<(String, String)>, Optio
         let part = part.trim();
         if let Some((k, v)) = part.split_once('=') {
             match k {
-                "macc_flash_msg" => {
+                "__Host-macc_flash_msg" => {
                     if !v.is_empty() {
                         // format: "ok:message" or "error:message"
-                        if let Some((kind, text)) = v.split_once(':') {
+                        let decoded = http::url_decode(v);
+                        if let Some((kind, text)) = decoded.split_once(':') {
                             msg = Some((kind.to_string(), text.to_string()));
                         }
                     }
                 }
-                "macc_flash_password" => {
+                "__Host-macc_flash_password" => {
                     if !v.is_empty() {
-                        password = Some(v.to_string());
+                        password = Some(http::url_decode(v));
                     }
                 }
                 _ => {}
@@ -72,9 +74,9 @@ fn read_flash_cookie(req: &crate::http::Req) -> (Option<(String, String)>, Optio
 
 fn redirect_with_flash(stream: &mut std::net::TcpStream, msg_kind: &str, msg_text: &str, password: Option<&str>) -> std::io::Result<()> {
     let mut headers = String::new();
-    headers.push_str(&format!("Set-Cookie: macc_flash_msg={}:{}; Path=/; HttpOnly; SameSite=Strict\r\n", msg_kind, msg_text));
+    headers.push_str(&format!("Set-Cookie: __Host-macc_flash_msg={}; Path=/; HttpOnly; Secure; SameSite=Strict\r\n", http::cookie_value(&format!("{msg_kind}:{msg_text}"))));
     if let Some(pw) = password {
-        headers.push_str(&format!("Set-Cookie: macc_flash_password={}; Path=/; HttpOnly; SameSite=Strict\r\n", pw));
+        headers.push_str(&format!("Set-Cookie: __Host-macc_flash_password={}; Path=/; HttpOnly; Secure; SameSite=Strict\r\n", http::cookie_value(pw)));
     }
     http::respond(stream, "303 See Other", "text/plain", "", &format!("{}Location: /\r\n", headers))
 }
@@ -99,10 +101,10 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let (flash_msg, flash_password) = read_flash_cookie(&req);
             
             let body = page(cfg, mapped.as_deref(), &user, flash_msg.as_ref().map(|(k,v)| (k.as_str(), v.clone())), flash_password.as_deref().unwrap_or(""), &csrf);
-            let mut headers = format!("Set-Cookie: macc_csrf={csrf}; Path=/; HttpOnly; SameSite=Strict\r\n");
+            let mut headers = format!("Set-Cookie: __Host-macc_csrf={csrf}; Path=/; HttpOnly; Secure; SameSite=Strict\r\n");
             // clear flash cookies
-            headers.push_str("Set-Cookie: macc_flash_msg=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
-            headers.push_str("Set-Cookie: macc_flash_password=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+            headers.push_str("Set-Cookie: __Host-macc_flash_msg=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict\r\n");
+            headers.push_str("Set-Cookie: __Host-macc_flash_password=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict\r\n");
             http::respond(
                 &mut stream,
                 "200 OK",
@@ -131,7 +133,7 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
             let cookie_ok = req
                 .headers
                 .get("cookie")
-                .is_some_and(|c| c.split(';').any(|p| p.trim() == format!("macc_csrf={form_csrf}")));
+                .is_some_and(|c| c.split(';').any(|p| p.trim() == format!("__Host-macc_csrf={form_csrf}")));
             if !cookie_ok {
                 http::respond(&mut stream, "403 Forbidden", "text/plain", "csrf check failed", "")?;
                 return Ok(());
@@ -212,15 +214,12 @@ fn handle(cfg: &Cfg, mapping: &mapping::Mapping, mut stream: TcpStream) -> std::
 fn localpart_from_headers(cfg: &Cfg, headers: &std::collections::HashMap<String, String>) -> Result<String, String> {
     let user = headers
         .get("x-auth-request-preferred-username")
-        .or(headers.get("x-auth-request-user"))
-        .or(headers.get("x-forwarded-user"))
         .ok_or("no authenticated user header (is oauth2-proxy in front?)")?;
 
     if let Some(g) = &cfg.allowed_group {
-        if let Some(groups) = headers.get("x-auth-request-groups") {
-            if !groups.split(',').any(|x| x.trim() == g.as_str()) {
-                return Err(format!("not a member of group '{g}'"));
-            }
+        let groups = headers.get("x-auth-request-groups").ok_or("missing authenticated groups")?;
+        if !groups.split(',').any(|x| x.trim() == g.as_str()) {
+            return Err(format!("not a member of group '{g}'"));
         }
     }
 
@@ -304,19 +303,38 @@ mod localpart_tests {
     }
 
     #[test]
-    fn email_header_yields_localpart_before_at() {
-        assert_eq!(lp_from(&[("x-auth-request-user", "alice@example.com")]).unwrap(), "alice");
+    fn preferred_username_yields_localpart_before_at() {
+        assert_eq!(lp_from(&[("x-auth-request-preferred-username", "alice@example.com")]).unwrap(), "alice");
     }
 
     #[test]
     fn bare_username_passes_through() {
-        assert_eq!(lp_from(&[("x-auth-request-user", "alice")]).unwrap(), "alice");
+        assert_eq!(lp_from(&[("x-auth-request-preferred-username", "alice")]).unwrap(), "alice");
+    }
+
+    #[test]
+    fn caller_controlled_fallback_header_cannot_impersonate_a_user() {
+        assert!(lp_from(&[("x-forwarded-user", "alice")]).is_err());
+        assert!(lp_from(&[("x-auth-request-user", "alice")]).is_err());
+    }
+
+    #[test]
+    fn missing_required_group_is_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert("x-auth-request-preferred-username".into(), "alice".into());
+        let cfg = super::Cfg {
+            port: String::new(), hs: String::new(), domain: String::new(),
+            web_url: String::new(), admin_token: String::new(), admin_user: String::new(),
+            admin_room: String::new(), allowed_group: Some("matrix_users".into()),
+            state_dir: String::new(),
+        };
+        assert!(super::localpart_from_headers(&cfg, &headers).is_err());
     }
 }
 
 fn page(cfg: &Cfg, existing_nick: Option<&str>, default_nick: &str, msg: Option<(&str, String)>, password: &str, csrf: &str) -> String {
     let message = msg
-        .map(|(kind, text)| format!("<p class=\"{}\">{}</p>", kind, http::html_escape(&text)))
+        .map(|(kind, text)| format!("<p class=\"{}\">{}</p>", http::html_escape(kind), http::html_escape(&text)))
         .unwrap_or_default();
     let web_url = if cfg.web_url.is_empty() {
         String::new()
